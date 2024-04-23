@@ -15,7 +15,6 @@ class Backbone:
     def __init__(self):
         self.db = self._db_connect()
         self.tickers = self._get_tickers()
-        print(MONGO_URI)
         self.last_updated = self.db.config.find_one({"last_updated": {"$exists":True}})["last_updated"]
 
     def _db_connect(self):
