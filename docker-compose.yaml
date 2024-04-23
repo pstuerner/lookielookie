@@ -1,0 +1,18 @@
+version: '3.1'
+
+services:
+  lookielookie:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lookielookie:latest
+    container_name: lookielookie
+    restart: always
+    networks:
+      - mongodb_default
+    env_file:
+      - .env
+
+networks:
+  mongodb_default:
+    external: true

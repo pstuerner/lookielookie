@@ -1,0 +1,3 @@
+55 8 * * * root /lookielookie/lookielookie/job.sh >> /var/log/cron.log 2>&1
+55 8 * * 1 root /lookielookie/lookielookie/job_fundamentals.sh >> /var/log/cron.log 2>&1
+# Empty line
