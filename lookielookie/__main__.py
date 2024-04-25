@@ -11,7 +11,9 @@ def timeseries():
     if weekday in [6, 0]: return
     
     bb = Backbone()
-    bb.timeseries()
+    bb.ohlcv()
+    bb.indicators()
+    bb.signals()
 
 @app.command()
 def fundamentals():
