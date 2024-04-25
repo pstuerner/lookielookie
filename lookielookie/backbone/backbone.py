@@ -9,12 +9,16 @@ from ta.volatility import AverageTrueRange
 from ta.trend import EMAIndicator
 
 from lookielookie.utils.constants import MONGO_URI, SP500_URL, R1000_URL, IGNORE, INIT_TS
+from lookielookie.utils.utils import topological_sort
+from lookielookie.indicators import indicators as inds
+from lookielookie.signals import signals as sigs
 
 
 class Backbone:
     def __init__(self):
         self.db = self._db_connect()
-        self.tickers = self._get_tickers()
+        # self.tickers = self._get_tickers()
+        self.tickers = ["AMT","UBER"]
         self.last_updated = self.db.config.find_one({"last_updated": {"$exists":True}})["last_updated"]
 
     def _db_connect(self):
@@ -45,6 +49,7 @@ class Backbone:
                 .assign(
                     date = lambda df: pd.to_datetime(df.date)
                 )
+                .rename(columns={"symbol":"ticker"})
                 .set_index("date")
             )
 
@@ -58,23 +63,7 @@ class Backbone:
         else:
             return pd.DataFrame(self.db.timeseries.find({"ticker":ticker},{"_id":0,"indicators":0}))
 
-    def signals(self, df):
-        df = (
-            df
-            .assign(
-                FU = lambda df: df.apply(lambda df: df.ema_3 > df.ema_6 > df.ema_9 > df.ema_12 > df.ema_15 > df.ema_18 > df.ema_21, axis=1),
-                FD = lambda df: df.apply(lambda df: df.ema_3 < df.ema_6 < df.ema_9 < df.ema_12 < df.ema_15 < df.ema_18 < df.ema_21, axis=1),
-                SU = lambda df: df.apply(lambda df: df.ema_24 > df.ema_27 > df.ema_30 > df.ema_33 > df.ema_36 > df.ema_39 > df.ema_42 > df.ema_45 > df.ema_48 > df.ema_51 > df.ema_54 > df.ema_57 > df.ema_60 > df.ema_63 > df.ema_66, axis=1),
-                SD = lambda df: df.apply(lambda df: df.ema_24 < df.ema_27 < df.ema_30 < df.ema_33 < df.ema_36 < df.ema_39 < df.ema_42 < df.ema_45 < df.ema_48 < df.ema_51 < df.ema_54 < df.ema_57 < df.ema_60 < df.ema_63 < df.ema_66, axis=1),
-                LONG = lambda df: np.where(np.logical_and(df.FU,df.SU), True, False),
-                SHORT = lambda df: np.where(np.logical_and(df.FD,df.SD), True, False),
-                SIDE = lambda df: np.where(np.logical_and(df.LONG==False,df.SHORT==False), True, False),
-            )
-        )
-
-        return df[["FU","FD","SU","SD","LONG","SHORT","SIDE"]]
-
-    def timeseries(self):
+    def ohlcv(self):
         new_last_updated = INIT_TS
         updated_cnt = 0
         df_all = self.get_ohlcv_from_yahoo(start=self.last_updated + td(days=1))
@@ -82,23 +71,12 @@ class Backbone:
         if df_all is None:
             return False
         else:
-            all_tickers = df_all.symbol.unique().tolist()
+            all_tickers = df_all.ticker.unique().tolist()
 
         for ticker in tqdm(all_tickers):
-            df_ticker = df_all.loc[lambda df: df.symbol==ticker]
+            df_ticker = df_all.loc[lambda df: df.ticker==ticker]
             df_db = pd.DataFrame(self.db.timeseries.find({"ticker": ticker}, {"_id": 0, "indicators": 0, "signals": 0, "ticker": 0}))
-            
-            if df_db.shape[0] > 0:
-                # Ticker was fetched before
-                df_db = df_db.set_index("date")
-            else:
-                # Ticker was not fetched before
-                if ticker not in IGNORE:
-                    df_db = pd.DataFrame(columns=["date","open","high","low","close","adjclose","volume"]).set_index("date")
-                else:
-                    continue
-            
-            last_ts = INIT_TS if len(df_db.index)==0 else df_db.index[-1]
+            last_ts = INIT_TS if df_db.shape[0]==0 else df_db.date.iloc[-1]
                 
             if last_ts < self.last_updated:
                 # DB is outdated
@@ -106,71 +84,152 @@ class Backbone:
             elif last_ts > self.last_updated:
                 # Ticker was already updated
                 continue
-
-            df_ohlcv = pd.concat([df_db, df_ticker])
-            last_ts_ohlcv = df_ohlcv.index[-1]
+                
+            df_ticker = (
+                df_ticker
+                .assign(
+                    indicators = lambda df: df["ticker"].apply(lambda f: {}),
+                    signals = lambda df: df["ticker"].apply(lambda f: {})
+                )
+                .reset_index()
+            )
+            last_ts_ohlcv = df_ticker.date.iloc[-1]
             new_last_updated = max(last_ts_ohlcv, new_last_updated)
 
-            # Indicators
-            # EMAs
-            emas = (
-                pd
-                .concat([EMAIndicator(close=df_ohlcv["adjclose"], window=window).ema_indicator() for window in range(3,69,3)], axis=1)
-                .round(2)
-            )
-            
-            # ATR
-            try:
-                atr = (
-                    pd.DataFrame(
-                        AverageTrueRange(df_ohlcv["high"], df_ohlcv["low"], df_ohlcv["adjclose"])
-                        .average_true_range()
-                    )
-                    .round(2)
-                )
-            except IndexError:
-                atr = pd.Series(np.nan, index=df_ohlcv.index, name="atr")
-            
-            df_ind = pd.concat([emas, atr], axis=1)
-            df = pd.concat(
-                [
-                    df_ohlcv.loc[lambda df: df.index > last_ts],
-                    df_ind.loc[lambda df: df.index > last_ts]
-                ],
-                axis=1
-            )
-            
-            # Signals
-            df_sig = self.signals(df)
-            df = pd.concat(
-                [
-                    df,
-                    df_sig
-                ],
-                axis=1
-            )
-            
-            # Insert
-            df_insert = (
-                df
-                .assign(
-                    ticker=ticker,
-                    indicators=lambda df: df.apply(lambda df: {**{f"ema_{i}":df[f"ema_{i}"] for i in range(3,69,3)},**{"atr":df["atr"]}}, axis=1),
-                    signals=lambda df: df.apply(lambda df: {c:df[c] for c in ["FU","FD","SU","SD","LONG","SHORT","SIDE"]}, axis=1)
-                )
-                .drop(columns=[f"ema_{i}" for i in range(3,69,3)]+["atr"]+["FU","FD","SU","SD","LONG","SHORT","SIDE"])
-                .reset_index()
-                .rename(columns={"index":"date"})
-                [["date","ticker","open","high","low","close","adjclose","volume","indicators","signals"]]
-            )
-
-            if df_insert.shape[0] > 0:
-                self.db.timeseries.insert_many(df_insert.to_dict("records"))
+            if df_ticker.shape[0] > 0:
+                self.db.timeseries.insert_many(df_ticker.to_dict("records"))
                 updated_cnt += 1
         
         if updated_cnt > 0:
             self.db.config.update_one({"last_updated": {"$exists":True}}, {"$set": {"last_updated": new_last_updated}})
             
+        return True
+
+    def indicators(self):
+        indicators = topological_sort(list(self.db.indicators.find({},{"_id": 0})))
+        ind_names = [x["name"] for x in indicators]
+        
+        for ticker in tqdm(self.tickers):
+            df = pd.DataFrame(self.db.timeseries.find({"ticker": ticker}).sort("date", 1))
+            if df.shape[0] == 0:
+                continue
+
+            df["indicators"] = df.indicators.apply(lambda f: {} if pd.isna(f) else f)
+            df["signals"] = df.signals.apply(lambda f: {} if pd.isna(f) else f)
+            inds_db = [k for k,v in df.sample(1)["indicators"].iloc[0].items()]
+            inds_cont = [x for x in ind_names if x in inds_db]
+            inds_remove = [x for x in inds_db if x not in ind_names]
+            inds_add = [x for x in ind_names if x not in inds_db]
+            update_indices = df.loc[lambda df: df.indicators=={}].index
+
+            if len(inds_cont) > 0 and len(update_indices) > 0:
+                df_indices = None
+                for d in [x for x in indicators if x["name"] in inds_cont]:
+                    cls = getattr(inds, d["class"])
+                    indicator = cls(data=df[d["requires"]], **d["params"])
+                    df_indices = indicator.calculate() if df_indices is None else pd.concat([df_indices, indicator.calculate()], axis=1)
+                df.iloc[update_indices,df.columns.get_loc("indicators")] = df_indices.iloc[update_indices].to_dict("records")
+
+            # Remove
+            if len(inds_remove) > 0:
+                update_indices = df.index
+                df = (
+                    df
+                    .assign(
+                        indicators = lambda df: df.loc[lambda df: ~pd.isna(df.indicators)].indicators.apply(lambda f: {k:v for k,v in f.items() if k not in inds_remove})
+                    )
+                )
+            
+            if len(inds_add) > 0:
+                update_indices = df.index
+                for d in [x for x in indicators if x["name"] in inds_add]:
+                    cls = getattr(inds, d["class"])
+                    indicator = cls(data=df[d["requires"]], **d["params"])
+                    df = pd.concat([df, indicator.calculate()], axis=1)
+                df = (
+                    df
+                    .assign(
+                        inds_add = lambda df: df[inds_add].to_dict("records"),
+                        indicators=lambda df: df.apply(lambda f: {**f["indicators"], **f["inds_add"]}, axis=1)
+                    )
+                    .drop(columns=["inds_add"]+inds_add)
+                )
+            
+            if len(update_indices) < 5:
+                for ui in update_indices:
+                    document = df.iloc[ui].to_dict()
+                    self.db.timeseries.update_one(
+                        {"_id": document["_id"]},
+                        {"$set": {"indicators": document["indicators"]}}
+                    )
+            else:
+                docs = df.iloc[update_indices][["date","ticker","open","high","low","close","adjclose","volume","indicators","signals"]].to_dict("records")
+                self.db.timeseries.delete_many({"_id": {"$in": df.iloc[update_indices]["_id"].to_list()}})
+                self.db.timeseries.insert_many(docs)
+
+        return True
+
+    def signals(self):
+        signals = list(self.db.signals.find({},{"_id": 0}))
+        sig_names = [x["name"] for x in signals]
+
+        for ticker in tqdm(self.tickers):
+            df = pd.DataFrame(self.db.timeseries.find({"ticker": ticker}).sort("date", 1))
+            if df.shape[0] == 0:
+                continue
+            
+            df["signals"] = df.signals.apply(lambda f: {} if pd.isna(f) else f)
+            sigs_db = [k for k,v in df.sample(1)["signals"].iloc[0].items()]
+            sigs_cont = [x for x in sig_names if x in sigs_db]
+            sigs_remove = [x for x in sigs_db if x not in sig_names]
+            sigs_add = [x for x in sig_names if x not in sigs_db]
+            update_signals = df.loc[lambda df: df.signals=={}].index
+
+            if len(sigs_cont) > 0 and len(update_signals) > 0:
+                df_signals = None
+                for d in [x for x in signals if x["name"] in sigs_cont]:
+                    cls = getattr(sigs, d["class"])
+                    signal = cls(data=df[d["requires"]], **d["params"])
+                    df_signals = signal.calculate() if df_signals is None else pd.concat([df_signals, signal.calculate()], axis=1)
+                df.iloc[update_signals,df.columns.get_loc("signals")] = df_signals.iloc[update_signals].to_dict("records")
+
+            # Remove
+            if len(sigs_remove) > 0:
+                update_signals = df.index
+                df = (
+                    df
+                    .assign(
+                        signals = lambda df: df.loc[lambda df: ~pd.isna(df.signals)].signals.apply(lambda f: {k:v for k,v in f.items() if k not in sigs_remove})
+                    )
+                )
+            
+            if len(sigs_add) > 0:
+                update_signals = df.index
+                for d in [x for x in signals if x["name"] in sigs_add]:
+                    cls = getattr(sigs, d["class"])
+                    signal = cls(data=df[d["requires"]], **d["params"])
+                    df = pd.concat([df, signal.calculate()], axis=1)
+                df = (
+                    df
+                    .assign(
+                        sigs_add = lambda df: df[sigs_add].to_dict("records"),
+                        signals=lambda df: df.apply(lambda f: {**f["signals"], **f["sigs_add"]}, axis=1)
+                    )
+                    .drop(columns=["sigs_add"]+sigs_add)
+                )
+            
+            if len(update_signals) < 5:
+                for ui in update_signals:
+                    document = df.iloc[ui].to_dict()
+                    self.db.timeseries.update_one(
+                        {"_id": document["_id"]},
+                        {"$set": {"signals": document["signals"]}}
+                    )
+            else:
+                docs = df.iloc[update_signals][["date","ticker","open","high","low","close","adjclose","volume","indicators","signals"]].to_dict("records")
+                self.db.timeseries.delete_many({"_id": {"$in": df.iloc[update_signals]["_id"].to_list()}})
+                self.db.timeseries.insert_many(docs)
+
         return True
     
     def fundamentals(self):
@@ -189,4 +248,6 @@ class Backbone:
 
 if __name__=="__main__":
     bb = Backbone()
-    bb.timeseries()
+    # bb.ohlcv()
+    # bb.indicators()
+    # bb.signals()
