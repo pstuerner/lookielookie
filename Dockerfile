@@ -12,10 +12,10 @@ COPY setup.py .
 RUN apt-get -y update \
     && apt-get install -yq cron nano python3 python3-pip tzdata \
     && touch /var/log/cron.log \
-    && pip3 install -r requirements.txt
+    && pip3 install --break-system-packages -r requirements.txt
 
 COPY /lookielookie /lookielookie/lookielookie
-RUN pip3 install .
+RUN pip3 install --break-system-packages .
 COPY crontab /etc/cron.d/cjob
 RUN chmod 0644 /etc/cron.d/cjob
 RUN chmod 0644 ./lookielookie/start.sh && chmod +x ./lookielookie/start.sh && chmod +x ./lookielookie/job.sh && chmod +x ./lookielookie/job_fundamentals.sh
