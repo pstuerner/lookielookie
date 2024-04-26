@@ -5,8 +5,6 @@ import pandas as pd
 import numpy as np
 from yahooquery import Ticker
 from tqdm import tqdm
-from ta.volatility import AverageTrueRange
-from ta.trend import EMAIndicator
 
 from lookielookie.utils.constants import MONGO_URI, SP500_URL, R1000_URL, IGNORE, INIT_TS
 from lookielookie.utils.utils import topological_sort
@@ -87,11 +85,12 @@ class Backbone:
                 
             df_ticker = (
                 df_ticker
+                .reset_index()
                 .assign(
+                    date = lambda df: df["date"].apply(lambda f: f.replace(tzinfo=None)),
                     indicators = lambda df: df["ticker"].apply(lambda f: {}),
                     signals = lambda df: df["ticker"].apply(lambda f: {})
                 )
-                .reset_index()
             )
             last_ts_ohlcv = df_ticker.date.iloc[-1]
             new_last_updated = max(last_ts_ohlcv, new_last_updated)
@@ -248,6 +247,6 @@ class Backbone:
 
 if __name__=="__main__":
     bb = Backbone()
-    # bb.ohlcv()
-    # bb.indicators()
-    # bb.signals()
+    bb.ohlcv()
+    bb.indicators()
+    bb.signals()
